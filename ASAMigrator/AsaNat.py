@@ -1,3 +1,5 @@
+import re
+
 class Nat(dict):
 
     def addGlobal(self, **kwargs):
@@ -33,7 +35,7 @@ class Nat(dict):
 
         if 'aclObj' not in kwargs.keys():
             network = kwargs['statement'].split()[0]
-            netmask = kwargs['statement'].split()[0]
+            netmask = kwargs['statement'].split()[1]
             details.update({'network': network})
             details.update({'netmask': netmask})
 
@@ -68,13 +70,14 @@ class Nat(dict):
             details.update({'realIP': 'access-list'})
         else:
             details.update({'realIP': parts.pop(0)})
+            details.update({'realPort': parts.pop(0)})
 
         validOptions = ['dns','netmask','norandomseq', 'tcp', 'udp']
 
         while len(parts) > 0:
             part = parts.pop(0)
             if part in ['netmask']:
-                details.update({'netmask': part})
+                details.update({'netmask': parts.pop(0)})
             if part in ['dns', 'norandomseq']:
                 details.update({part: True})
             if part in ['tcp', 'udp']:
@@ -104,7 +107,7 @@ class Nat(dict):
         while len(parts) > 0:
             part = parts.pop(0)
             if part in ['netmask']:
-                details.update({'netmask': part})
+                details.update({'netmask': parts.pop(0)})
             if part in ['dns', 'norandomseq']:
                 details.update({part: True})
             if part in ['tcp', 'udp']:
@@ -120,12 +123,123 @@ class Nat(dict):
 
         return details
 
-
     def getGlobalStatement(self, interface, globalId):
         globalObj = self.get('global')
         if interface in globalObj.keys() and \
             globalId in globalObj.get(interface).keys():
                 return globalObj.get(interface).get(globalId)
+
+    def getGlobalIntsById(self, id):
+        globalObj = self.get('global')
+        return set([i for i in globalObj.keys() if id in globalObj[i].keys()])
+    '''
+    def NetworkObject(self, d, prefix='obj'):
+        if 'netObj' not in self.keys():
+            self.update({'netObj': {}})
+        netObj = self.get('netObj')
+
+        objectName = prefix + '-' + re.sub(r'/', '-', d['cidr'])
+        if 'host' in d.keys():
+            string = 'host {}'.format(d['network'])
+        else:
+            string = 'subnet {} {}'.format(d['network'],d['netmask'])
+        if objectName not in netObj.keys():
+            netObj.update({objectName: string})
+
+        return objectName
+
+
+    def getNetworkObjectConfig(self):
+        netObj = self.get('netObj')
+        string = 'object network {}\n {}'
+        retList = []
+        for k in netObj:
+            retList.append(string.format(k,netObj.get(k)))
+        return '\n'.join(retList)
+'''
+    def addPolicySNAT(self, d):
+        if 'polcySNAT' not in self.keys():
+            self.update({'polcySNAT': []})
+        self.get('polcySNAT').append(d)
+
+    def getPolicySNATConfig(self):
+        string = 'nat ({},{}) after-auto source {} {} {} destination static {} {}'
+        retList = []
+        for p in self.get('polcySNAT'):
+            s = string.format(p['real_ifc'], p['mapped_ifc'],
+                                         p['type'],
+                                         p['real_src'], p['mapped_src'],
+                                         p['real_dst'], p['mapped_dst'])
+            if p['dstSvc'] is not None:
+                s = s + " {} {}".format(p['dstSvc'], p['dstSvc'])
+            retList.append(s)
+        return '\n'.join(retList)
+
+    def addSNAT(self, grpName, real_ifc, mapped_ifc, mappedAddressInfo):
+        if 'SNAT' not in self.keys():
+            self.update({'SNAT': {}})
+        if grpName not in self.get('SNAT').keys():
+            self.get('SNAT').update({grpName: []})
+        snatObj = self.get('SNAT')[grpName]
+        if 'interface' in mappedAddressInfo.keys():
+            address = 'interface'
+        else:
+            address = mappedAddressInfo['network']
+
+        newEntry = {'real_ifc': real_ifc, 'mapped_ifc': mapped_ifc,
+                    'address': address}
+        # check for duplicates
+        for obj in snatObj:
+            if len(set(obj.items()) & set(newEntry.items())) >= \
+                    len(obj.items()):
+                #duplicate found
+                return
+
+        snatObj.append(newEntry)
+
+    def getSNATConfig(self):
+        natstring = ' nat ({},{}) dynamic {}'
+        if 'SNAT' not in self.keys():
+            return ""
+        snatObj = self.get('SNAT')
+        retList = []
+        for k in snatObj.keys():
+            retList.append('object network {}'.format(k))
+            for obj in snatObj[k]:
+                retList.append(natstring.format(obj['real_ifc'],
+                                               obj['mapped_ifc'],
+                                               obj['address']))
+        return '\n'.join(retList)
+
+    def addStaticNAT(self, **newEntry):
+        if 'StaticNAT' not in self.keys():
+            self.update({'StaticNAT': []})
+        snatObj = self.get('StaticNAT')
+
+        # check for duplicates
+        for obj in snatObj:
+            if len(set(obj.items()) & set(newEntry.items())) >= \
+                    len(obj.items()):
+                #duplicate found
+                return
+        snatObj.append(newEntry)
+
+    def getStaticNATConfig(self):
+        if 'StaticNAT' not in self.keys():
+            return
+        snatObj = self.get('StaticNAT')
+
+        main = "nat ({},{}) after-auto source static {} {}"
+        service = " service {} {}"
+
+        retList = []
+        for obj in snatObj:
+            s = main.format(obj['real_ifc'], obj['mapped_ifc'],
+                            obj['real_ip'], obj['mapped_ip'])
+            if 'real_svc' in obj.keys():
+                s = s + service.format(obj['real_svc'], obj['mapped_svc'])
+            retList.append(s)
+        return '\n'.join(retList)
 
     def __str__(self):
 

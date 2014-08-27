@@ -7,6 +7,7 @@ from AsaACL import *
 from AsaNat import *
 from AsaObjGrp import *
 from RouteTable import *
+from ipUtils import *
 
 class ASAProcessor():
 
@@ -39,8 +40,6 @@ class ASAProcessor():
         return self
 
     def __exit__(self, type, value, traceback):
-        print "start exit"
-
         if self.saveState:
             f = open(self.stateSave, 'wb')
             try:
@@ -86,15 +85,17 @@ class ASAProcessor():
     def updateObjectGroups(self):
         if 'objectGroups' in self.config.keys() and self.useCache:
             print "Using cached Object Group data"
-            print self.config['objectGroups']
             return
 
         showObj = self.interactor.runcmd('show running-config object-group', timeout=60)
-        objGrpObj = AsaObjGrp(showObj)
+        objGrpObj = AsaObjGrp()
+        objGrpObj.createGroupsFromConfig(showObj)
         self.config['objectGroups'] = objGrpObj
 
     def updateAccessLists(self):
         accessLists = self.config['accessLists']
+
+        objGrpObj = self.config['objectGroups']
         if self.useCache:
             ACLs = [a for a in self.getAccessLists()
                     if a not in accessLists.keys()]
@@ -103,7 +104,7 @@ class ASAProcessor():
 
         for ACL in ACLs:
             aclList = self.getShowAccessList(ACL)
-            aclObj = AsaAcl(aclList)
+            aclObj = AsaAcl(aclList, objGrpObj)
             accessLists.update({ACL: aclObj})
 
     def updateAccessGroupMappings(self):
@@ -231,12 +232,17 @@ class ASAProcessor():
         return iList[0]
 
     def updateNAT(self):
-        accessLists = self.config['accessLists']
-        if 'nat' in self.config.keys():
-            print 'Using Cached NAT information'
-            return
+
+        #if len(self.config['nat'].keys()) > 0:
+        #    print 'Using Cached NAT information'
+        #    return
 
         natObj = Nat()
+        self._updateGlobals(natObj)
+        self._updateDynamicNat(natObj)
+        self._updateStaticNat(natObj)
+
+    def _updateGlobals(self, natObj):
         # Global Nat
         regex = re.compile(r'global\s+\(([^\)]+)\)\s+(\d+)\s+(.*)')
         showGlobal = self.interactor.runcmd('show running-config global', timeout=60)
@@ -249,6 +255,8 @@ class ASAProcessor():
             details.update({'statement': m.group(3)})
             natObj.addGlobal(**details)
 
+    def _updateDynamicNat(self, natObj):
+        accessLists = self.config['accessLists']
         # Dynamic Nat
         regex = re.compile(r'nat\s+\(([^\)]+)\)\s+(\d+)\s+(.*)')
         showNat = self.interactor.runcmd('show running-config nat', timeout=60)
@@ -267,6 +275,8 @@ class ASAProcessor():
 
             natObj.addDynamic(**details)
 
+    def _updateStaticNat(self, natObj):
+        accessLists = self.config['accessLists']
         # Static Nat
         regex = re.compile(r'static\s+\(([^,]+),([^\)]+)\)\s+(.*)')
         showStatic = self.interactor.runcmd('show running-config static', timeout=60)
@@ -281,18 +291,203 @@ class ASAProcessor():
             if 'access-list' in statement:
                 i = statement.split().index('access-list')
                 aclName = statement.split()[i+1]
+                aclObj = accessLists[aclName]
                 details.update({'aclObj': aclObj})
 
             natObj.addStatic(**details)
 
         self.config['nat'] = natObj
 
+    def processNat(self):
+        natObj = self.config['nat']
+        objGrpObj = self.config['objectGroups']
 
-    def test(self):
-            print self.config['nat']
+        for n in natObj['dynamic']:
+            if 'aclObj' in n.keys():
+                self._processPolicySNAT(n)
+            else:
+                self._processSNAT(n)
+
+        # If you are natting to the same IP, new syle does this by default.
+        # Filter such incidents
+        useFullNat = [n for n in natObj['static']
+                      if n['mappedIp'] != n['realIP'] ]
+        for n in useFullNat:
+                if 'aclObj' in n.keys():
+                    self._processPolicyStaticNAT(n)
+                else:
+                    self._processStaticNAT(n)
+
+    def getNatConfig(self):
+        objGrpObj = self.config['objectGroups']
+        natObj = self.config['nat']
+
+        print objGrpObj.getNewAndMigratedObjects()
+        print natObj.getPolicySNATConfig()
+        print natObj.getSNATConfig()
+        print natObj.getStaticNATConfig()
+
+    def _processSNAT(self, snatObj):
+        objGrpObj = self.config['objectGroups']
+        natObj = self.config['nat']
+        ingressInt = snatObj['interface']
+        globalId = snatObj['id']
+        possibleEgressInts = natObj.getGlobalIntsById(globalId)
+        egressInts = set(possibleEgressInts) - set(ingressInt)
+        cidr = ipUtils.CIDRfromNetworkNetmask(snatObj['network'],
+                                              snatObj['netmask'])
+        snatObj.update({'cidr': cidr})
+        for i in egressInts:
+            objPrefix = "obj-{}-{}".format(ingressInt,i)
+            grpName = objGrpObj.createNetworkGroup(prefix=objPrefix, **snatObj)
+            g = natObj.getGlobalStatement(i, globalId)
+            natObj.addSNAT(grpName, ingressInt, i, g)
+
+    def _processStaticNAT(self, snatObj):
+        objGrpObj = self.config['objectGroups']
+        natObj = self.config['nat']
+        netmask = snatObj['netmask']
+        rip = snatObj['realIP']
+        mip = snatObj['mappedIp']
+
+        rcidr = ipUtils.CIDRfromNetworkNetmask(rip,
+                                               netmask)
+        mcidr = ipUtils.CIDRfromNetworkNetmask(mip,
+                                               netmask)
+        rGrp = objGrpObj.createNetworkGroup(cidr=rcidr, network=rip,
+                                            netmask=netmask)
+        mGrp = objGrpObj.createNetworkGroup(cidr=mcidr, network=mip,
+                                            netmask=netmask)
+
+        d = {'real_ifc': snatObj['realifc'], 'mapped_ifc': snatObj['mappedifc'],
+             'real_ip': rGrp, 'mapped_ip': mGrp}
+        if 'protocol' in snatObj.keys():
+            realSvc = {'protocol': snatObj['protocol'],
+                       'startPort': snatObj['realPort'],
+                       'operator': 'eq'}
+
+            mappedSvc = {'protocol': snatObj['protocol'],
+                       'startPort': snatObj['mappedPort'],
+                       'operator': 'eq'}
+            realSvcGrp = objGrpObj.createServiceGroup(**realSvc)
+            mappedSvcGrp = objGrpObj.createServiceGroup(**mappedSvc)
+            d.update({'real_svc': realSvcGrp,
+                      'mapped_svc': mappedSvcGrp})
+        natObj.addStaticNAT(**d)
+
+    def _processPolicyStaticNAT(self, snatObj):
+        objGrpObj = self.config['objectGroups']
+        natObj = self.config['nat']
+        # From what I have seen, this is pretty much static source NAT
+        aclObj = snatObj['aclObj']
+        real_ifc = snatObj['realifc']
+        mapped_ifc = snatObj['mappedifc']
+        mappedIp = snatObj['mappedIp']
+        # No netmask, is it assumed /32
+        if 'netmask'  in snatObj.keys():
+            netmask = snatObj['netmask']
+        else:
+            netmask = "255.255.255.255"
+        cidr = ipUtils.CIDRfromNetworkNetmask(mappedIp, netmask)
+        srcIPMapped =  objGrpObj.createNetworkGroup(network=mappedIp,
+                                                    netmask=netmask, cidr=cidr)
+        for acl in aclObj.getTopLevelACLs():
+            ACEdetails = acl.getACEDetails()
+            srcIPReal, srcSvc = self._processPolicySNATSrcDst(ACEdetails['source'],
+                                                      ACEdetails['protocol'])
+            dstIPReal, dstSvc = self._processPolicySNATSrcDst(ACEdetails['destination'],
+                                                      ACEdetails['protocol'])
+
+            d = {'type': 'static',
+                     'real_ifc': real_ifc, 'mapped_ifc': mapped_ifc,
+                     'real_src': srcIPReal, 'mapped_src': srcIPMapped,
+                     'real_dst': dstIPReal, 'mapped_dst': dstIPReal,
+                     'srcSvc': dstSvc, 'dstSvc':dstSvc}
+            natObj.addPolicySNAT(d)
+            del srcIPReal, srcSvc, dstIPReal, dstSvc
+
+    def _processPolicySNAT(self, snatObj):
+        natObj = self.config['nat']
+        r = self.config['routeTable']
+        ingressInt = snatObj['interface']
+        aclObj = snatObj['aclObj']
+        globalId = snatObj['id']
+        if globalId == '0':
+            # Potentially NAT 0 is not needed in new world
+            return
+            possibleEgressInts = r.getAllInterfaces()
+            NATType = 'static'
+        else:
+            possibleEgressInts = natObj.getGlobalIntsById(globalId)
+            NATType = 'dynamic'
+        egressInts = aclObj.getDestinationInterfaces(r)
+
+        for acl, egressInts in aclObj.getTopLevelACLs(getInterfaces=True,
+                                                       routeTableObj=r):
+            egressInts = egressInts - set([ingressInt])
+            egressInts = egressInts & possibleEgressInts
+            ACEdetails = acl.getACEDetails()
+            srcIPReal, srcSvc = self._processPolicySNATSrcDst(ACEdetails['source'],
+                                                      ACEdetails['protocol'])
+            dstIPReal, dstSvc = self._processPolicySNATSrcDst(ACEdetails['destination'],
+                                                      ACEdetails['protocol'])
+
+            for inter in egressInts:
+                if globalId == '0':
+                    srcIPMapped = srcIPReal
+                else:
+                    g = natObj.getGlobalStatement(inter, globalId)
+                    srcIPMapped = self._processSNATGlobal(g)
+                d = {'type': NATType,
+                     'real_ifc': ingressInt, 'mapped_ifc': inter,
+                     'real_src': srcIPReal, 'mapped_src': srcIPMapped,
+                     'real_dst': dstIPReal, 'mapped_dst': dstIPReal,
+                     'srcSvc': dstSvc, 'dstSvc':dstSvc}
+                natObj.addPolicySNAT(d)
+            del srcIPReal, srcSvc, dstIPReal, dstSvc
 
 
+    def _processPolicySNATSrcDst(self, sd, prot):
+        objGrpObj = self.config['objectGroups']
+        if 'network-object' in sd.keys():
+            address = sd['network-object']
+        elif 'cidr' in sd.keys():
+            address = objGrpObj.createNetworkGroup(**sd)
 
+        if prot['protocol'] == 'ip':
+            service = None
+        elif  'service-object' in sd.keys():
+            protocolHint = prot['protocol']
+            objectName = sd.get('service-object')
+            service = objGrpObj.migrateToTypeObject(objectName,protocolHint)
+        elif prot['protocol'] in ['tcp', 'udp'] and 'operator' in sd.keys():
+            kwargs = {'protocol': prot['protocol'],
+                      'operator': sd['operator'],
+                      'startPort': sd['portStart']}
+            if 'endport' in sd.keys():
+                kwargs.update({'endPort': sd['portEnd']})
+            service = objGrpObj.createServiceGroup(**kwargs)
+        elif prot['protocol'] not in ['tcp', 'udp']:
+            kwargs = {'protocol': prot['protocol']}
+            service = objGrpObj.createServiceGroup(**kwargs)
+        else:
+            service = None
+
+        return address, service
+
+    def _processSNATGlobal(self, d):
+        objGrpObj = self.config['objectGroups']
+        if 'interface' in d.keys():
+            return 'interface'
+        else:
+            cidr = ipUtils.CIDRfromNetworkNetmask(d['network'], d['netmask'])
+            d.update({'cidr': cidr})
+            return objGrpObj.createNetworkGroup(**d)
+
+    def pp(self,a):
+        import pprint
+        pp = pprint.PrettyPrinter(indent=4)
+        pp.pprint(a)
 
 from datetime import datetime, timedelta
 class TimeEstimator():

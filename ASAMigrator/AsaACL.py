@@ -121,18 +121,36 @@ class AsaAcl (dict):
 
         return '\n'.join(returnStringList)
 
-    def getDestinationInterfaces(self, routeTableObj):
+    def getDestinationInterfaces(self, routeTableObj, forIndex=None):
         r = routeTableObj
         AEObj = self.get('aclEntries')
         iList = []
-        for k in AEObj.keys():
+        if forIndex is not None:
+            keys = [k for k in AEObj.keys() if k >= forIndex and \
+                                                k < forIndex + 1]
+        else:
+            keys = AEObj.keys()
+        for k in keys:
             destObj = AEObj[k].get('destination')
-            if destObj is not None:
+            if destObj is not None and 'cidr' in destObj.keys():
                 cidr = ipUtils.randomFromCIDRAddress(destObj['cidr'])
-                iList.append(r.getInterface(cidr))
+                i = r.getInterface(cidr)
+                if i is not None:
+                    iList.append(i)
 
         return set(iList)
 
+    def getTopLevelACLs(self, getInterfaces=False, routeTableObj=None):
+        AEObj = self.get('aclEntries')
+        aclIndexes = sorted([i for i in AEObj.keys() if i % 1 == 0])
+        for aclIndex in aclIndexes:
+            ACLObj = AEObj[aclIndex]
+            if isinstance(ACLObj, ACEExtended):
+                if getInterfaces:
+                    i = self.getDestinationInterfaces(routeTableObj, aclIndex)
+                    yield ACLObj, i
+                else:
+                    yield ACLObj
 
     def __repr__(self):
         returnStringList = []
@@ -176,6 +194,9 @@ class ACEObject(dict):
     def getDestinationIP(self):
         return None
 
+    def getACEDetails(self):
+        return None
+
 class ACEInformational (ACEObject):
 
     def __init__(self, AclObj, l, t, s):
@@ -209,24 +230,18 @@ class ACEExtended (ACEObject):
 
         self.update({'objGrpObj': self.get('parentObj')['objGrpObj']})
 
-        # Remove the 0xa476609f part
-        idIndex = [i for i, part in enumerate(parts)
-                        if re.match(r'0x[a-fA-F0-9]{8}', part)][0]
-        if idIndex:
-            parts.pop(idIndex)
         self.update({'options': {}})
         options = self.get('options')
         while len(eList) > 0:
             part = parts.pop(0)
             if part in ['permit', 'deny']:
                 self.update({'action': part})
-            elif part in ASAInfo.validProtocolTypes.keys() or \
-                        (part == 'object-group' and \
-                         self.nextIsObjectGroup('protocol')):
-                if part == 'object-group':
-                    self.update({'protocol-object': parts.pop(0)})
-                else:
+            elif part in ASAInfo.validProtocolTypes.keys():
                     self.update({'protocol': part})
+            elif part == 'object-group' and self.nextIsObjectGroup('protocol'):
+                    self.update({'protocol-object': parts.pop(0)})
+            elif part == 'object-group' and self.nextIsObjectGroup('service'):
+                    self.update({'service-object': parts.pop(0)})
             elif part in ['host', 'any'] or ipUtils.isIPAddress(part) or \
                         (part == 'object-group' and \
                          self.nextIsObjectGroup('network')):
@@ -293,7 +308,9 @@ class ACEExtended (ACEObject):
                     options.update({part: True})
             elif re.match(r'\(hitcnt=\d+\)', part):
                 self.setUnitTest()
-            elif re.match(r'0x[a-fA-F0-9]{8}', part):
+            elif re.match(r'^0x[a-fA-F0-9]{1,8}$', part):
+                pass
+            elif part in ['(inactive)']:
                 pass
             else:
                 print "have no idea what to do with {}".format(part)
@@ -306,7 +323,7 @@ class ACEExtended (ACEObject):
         if o.isObjectGroup(parts[index]):
             returnFlag = True
             if objType is not None and \
-                not o.objectGroupIsType(parts[0], 'objGrpObj'):
+                not o.objectGroupIsType(parts[index], objType):
                 returnFlag = False
             return returnFlag
         else:
@@ -394,6 +411,18 @@ class ACEExtended (ACEObject):
     def getDestinationIP(self):
         return ipUtils.randomFromCIDRAddress(self.get('destination')['cidr'])
 
+    def getACEDetails(self):
+        src = self.get('source').getAddressForNAT()
+        dst = self.get('destination').getAddressForNAT()
+
+        returnkeys = ['protocol', 'protocol-object', 'service-object']
+        prot = {}
+        for key in set(self.keys()) & set(returnkeys):
+            prot.update({key: self.get(key)})
+
+        return {'protocol': prot, 'source': src, 'destination': dst}
+
+
     def __str__(self):
         return self.__repr__()
 
@@ -417,8 +446,8 @@ class ACEProtocol(dict):
         return self.__repr__()
 
     def __repr__(self):
-        if 'protocol-group' in self.keys():
-            s = 'object-group {}'.format(self.get('protocol-group'))
+        if 'protocol-object' in self.keys():
+            s = 'object-group {}'.format(self.get('protocol-object'))
         else:
             s = self.get('protocol')
 
@@ -429,7 +458,7 @@ class ACESrcDst(dict):
         for k, v in kwargs.iteritems():
             self.update({k: v})
 
-        if 'network-group' not in self.keys():
+        if 'network-object' not in self.keys():
             cidr = ipUtils.CIDRfromNetworkNetmask(self['network'],
                                                   self['netmask'])
             prefixLen = ipUtils.prefixLenFromNetmask(self['netmask'])
@@ -442,12 +471,22 @@ class ACESrcDst(dict):
                 self.update({'any': True})
 
     def getRandomIP(self, routeCidrList=None):
-        if 'network-group' not in self.keys():
+        if 'network-object' not in self.keys():
             return ipUtils.randomFromCIDRAddress(self.get('cidr'))
 
+    def getAddressForNAT(self):
+        returnkeys = ['host', 'any', 'cidr', 'network', 'netmask',
+                      'network-object', 'service-object', 'operator',
+                      'portStart', 'portEnd']
+        d = {}
+        for key in set(self.keys()) & set(returnkeys):
+            d.update({key: self.get(key)})
+
+        return d
+
     def __repr__(self):
-        if 'network-group' in self.keys():
-            s = 'object-group {}'.format(self.get('network-group'))
+        if 'network-object' in self.keys():
+            s = 'object-group {}'.format(self.get('network-object'))
         elif 'any' in self.keys():
             s = 'any'
         elif 'host' in self.keys():
@@ -455,8 +494,8 @@ class ACESrcDst(dict):
         else:
             s = '{} {}'.format(self.get('network'), self.get('netmask'))
 
-        if 'service-group' in self.keys():
-            s = s + ' object-group {}'.format(self.get('service-group'))
+        if 'service-object' in self.keys():
+            s = s + ' object-group {}'.format(self.get('service-object'))
         elif 'operator' in self.keys():
             s = s + ' {} {}'.format(self.get('operator'), self.get('portStart'))
             if self.get('operator') == 'range':
@@ -477,8 +516,8 @@ class ACEICMP(dict):
         return self.__repr__()
 
     def __repr__(self):
-        if 'icmp-group' in self.keys():
-            s = 'object-group {}'.format(self.get('icmp-group'))
+        if 'icmp-object' in self.keys():
+            s = 'object-group {}'.format(self.get('icmp-object'))
         else:
             s = self.get('icmpType')
             if 'icmpCode' in self.keys():

@@ -61,13 +61,15 @@ def startProcessor(ASAi=None, **kwargs):
                 ASAp.updateAccessLists()
                 ASAp.updateAccessGroupMappings()
                 ASAp.updateNAT()
-                    #ASAp.prepareUnitTests()
+                #ASAp.prepareUnitTests()
             if kwargs['unitTests']:
                 ASAp.performUnitTests()
         if kwargs['report'] is not None:
             print ASAp.getUnitTestReports()
 
-        print ASAp.test()
+        ASAp.processNat()
+        ASAp.getNatConfig()
+
         #print ASAp.getACLEgressInterfaces('ahm')
 
 def main(argv=None): # IGNORE:C0111
@@ -101,6 +103,7 @@ USAGE
         # Setup argument parser
         parser = ArgumentParser(description=program_license, formatter_class=RawDescriptionHelpFormatter)
 
+
         parser.add_argument('-V', '--version', action='version', version=program_version_message)
         parser.add_argument("-v", "--verbose", dest="verbose", action="count", help="set verbosity level [default: %(default)s]")
         parser.add_argument("-b", "--baseline", dest="gatherBaseline", action="store_true", help="Gather baseline data from source ASA")
@@ -110,17 +113,10 @@ USAGE
         parser.add_argument("-u", "--unittests", dest="unitTests", action="store_true", help="Perform ACL Unit Tests against stored state data")
         parser.add_argument("-r", "--report", dest="report", help="Location for the unit test report [default: %(default)s]", metavar="FILE")
         parser.add_argument('-P', "--prompt", dest="prompt", help="Command Line Prompt, set via hostname command [default: %(default)s]", metavar="PROMPT", default='ciscoasa')
-        parser.add_argument('-c', "--connect", dest="host", help="ASA to connect to", metavar="user[:password]@host")
+        parser.add_argument('-c', "--connect", dest="host", help="ASA to connect to", metavar="user:password@host.name")
 
         # Process arguments
         args = parser.parse_args()
-
-        if args.host is not None:
-            connect = True
-            m = re.match(r'(.*?)(?::(.*))?@(.*)', args.host)
-            username, password, hostname =  m.group(1), m.group(2), m.group(3)
-        else:
-            connect = False
         kwargs = {}
         kwargs['ignoreState'] = args.ignoreState
         kwargs['noSave'] = args.noSave
@@ -128,7 +124,6 @@ USAGE
         kwargs['unitTests'] = args.unitTests
         kwargs['report'] = args.report
         kwargs['connect'] = args.host
-
 
     except KeyboardInterrupt:
         ### handle keyboard interrupt ###
@@ -140,6 +135,14 @@ USAGE
         sys.stderr.write(program_name + ": " + repr(e) + "\n")
         sys.stderr.write(indent + "  for help use --help\n")
         return 2
+
+    if args.host is not None:
+        connect = True
+        m = re.match(r'(.*?)(?::(.*))?@(.*)', args.host)
+        username, password, hostname =  m.group(1), m.group(2), m.group(3)
+    else:
+        connect = False
+
 
     if connect:
         with ASAInteractor(hostname, username, password, args.prompt) as ASAi:

@@ -1,5 +1,4 @@
 import re
-import pickle
 import os
 
 from ASAInteractor import *

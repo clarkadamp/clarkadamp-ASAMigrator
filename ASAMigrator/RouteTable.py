@@ -44,13 +44,17 @@ class RouteTable(list):
 
     def getLongestMatch(self, ip, **kwargs ):
         # Assumes route table sorted by prefix length, return first hit
+        retDetails = set(['protocol', 'cidr','network','netmask', 'interface',
+                          'via'])
         for r in self:
             if r.matches(ip):
                 if 'attr' in kwargs and kwargs['attr'] in r.keys():
                     return r[kwargs['attr']]
                 else:
-                    return (r['protocol'], r['cidr'], r['network'],
-                            r['netmask'], r['interface'], r['via'] )
+                    returnDict = {}
+                    for key in set(r.keys()) & retDetails:
+                        returnDict.update({key: r.get(key)})
+                    return returnDict
         # Otherwise return None
         return None
 
@@ -59,6 +63,9 @@ class RouteTable(list):
 
     def getCIDRbyInterface(self, interface):
         return [r['cidr'] for r in self if r['interface'] == interface]
+
+    def getAllInterfaces(self):
+        return set([r['interface'] for r in self])
 
 class Route(dict):
     '''
