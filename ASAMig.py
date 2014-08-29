@@ -54,21 +54,26 @@ def startProcessor(ASAi=None, **kwargs):
 
     with ASAProcessor(ASAi, saveState) as ASAp:
         if kwargs['connect']:
-            print ASAp.updateOsVersions()
+            print ASAp.updateOsVersions(isBaseline=kwargs['gatherBaseline'])
             if kwargs['gatherBaseline']:
                 ASAp.updateRouteTable()
                 ASAp.updateObjectGroups()
                 ASAp.updateAccessLists()
                 ASAp.updateAccessGroupMappings()
                 ASAp.updateNAT()
-                #ASAp.prepareUnitTests()
             if kwargs['unitTests']:
+                ASAp.prepareUnitTests()
                 ASAp.performUnitTests()
         if kwargs['report'] is not None:
             print ASAp.getUnitTestReports()
 
-        ASAp.processNat()
-        ASAp.getNatConfig()
+
+        if False:
+            ASAp.processNat()
+            ASAp.getNatConfig()
+            ASAp.getUpdatedACLs()
+
+        #ASAp.test()
 
         #print ASAp.getACLEgressInterfaces('ahm')
 

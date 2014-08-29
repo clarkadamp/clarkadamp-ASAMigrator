@@ -171,7 +171,7 @@ class Nat(dict):
                                          p['real_src'], p['mapped_src'],
                                          p['real_dst'], p['mapped_dst'])
             if p['dstSvc'] is not None:
-                s = s + " {} {}".format(p['dstSvc'], p['dstSvc'])
+                s = s + " service {} {}".format(p['dstSvc'], p['dstSvc'])
             retList.append(s)
         return '\n'.join(retList)
 

@@ -1,9 +1,11 @@
+import copy
 import re
 import random
 import socket
 import struct
 import ipUtils
 import ASAInfo
+from bs4 import BeautifulSoup
 
 class AsaAcl (dict):
     def __init__ (self, AclList, objGrpObj):
@@ -83,41 +85,50 @@ class AsaAcl (dict):
         while True:
             rawTestResult = (yield)
             if validResultRe.search(rawTestResult):
-                resultAsList = rawTestResult.split('\n')
-                actionXML = [l for l in resultAsList
-                             if l.startswith('<action>')][0]
-                action = self._getXMLDataFromElement(actionXML)
-                dropReason = ''
-                if action == 'drop':
-                    dropReasonXML = [l for l in resultAsList
-                                     if l.startswith('<drop-reason>')][0]
-                    dropReason = self._getXMLDataFromElement(dropReasonXML)
-
-                testResults = {'action': action, 'reason': dropReason,
-                               'rawResult': rawTestResult }
+                results = {'status': 'ok'}
+                results.update({'resultXML': rawTestResult})
             else:
-                testResults = {'action': 'unknown', 'reason': 'Test Failed',
-                           'rawResult': rawTestResult }
+                results = {'status': 'error'}
 
-            self.get('currentUnitTestACL').setTestResult(version, testResults)
+            self.get('currentUnitTestACL').setTestResult(version, results)
 
     def _getXMLDataFromElement(self, s):
         return re.match(r'<[^>]+>(.*)</[^>]+>', s).group(1)
 
-    def getTestReport(self, versionList):
+    def getTestReport(self, versionList, baselineVersion):
         returnStringList = []
         aclEntries = self.get('aclEntries')
+
+        testHeaders = TestResult().getReportHeaders()
+        rString = ''
+        for h in testHeaders:
+            rString = rString + ',"{' + h + '}"'
+
+
+
         for key in sorted(aclEntries.keys()):
+            s = '"{}","{}","{}","{}"'.format(self.get('name'), key,
+                                                      str(aclEntries[key]),
+                                                      aclEntries[key].getUnitTest())
 
-            string = '"{}","{}","{}","{}"'.format(self.get('name'), key,
-                                               str(aclEntries[key]),
-                                               aclEntries[key].getUnitTest())
+            if 'unitTest' not in aclEntries[key].keys():
+                    tResults = TestResult().getReportTemplate()
+                    tResults.update({'Action': 'N/A'})
+                    s = s + rString.format(**tResults)
+                    returnStringList.append(s)
+                    continue
+
+            tResults = aclEntries[key].getTestResult(baselineVersion)
+            s = s + rString.format(**tResults)
+
             for version in versionList:
+                if baselineVersion == version:
+                    continue
                 tResults = aclEntries[key].getTestResult(version)
-                string = string + ',"{}","{}"'.format( tResults['action'],
-                                                        tResults['reason'])
-
-            returnStringList.append(string)
+                s = s + rString.format(**tResults)
+                compare = aclEntries[key].compareResults(baselineVersion, version)
+                s = s + ',"{}"'.format(compare)
+            returnStringList.append(s)
 
         return '\n'.join(returnStringList)
 
@@ -151,6 +162,66 @@ class AsaAcl (dict):
                     yield ACLObj, i
                 else:
                     yield ACLObj
+
+    def changeDestinationIP(self, oldCIDR, newCIDR):
+        if 'exactMatchedACLs' not in self.keys():
+            self.update({'exactMatchedACLs': []})
+        if 'netMatchedACLs' not in self.keys():
+            self.update({'netMatchedACLs': []})
+        exactMatchedACLs = self.get('exactMatchedACLs')
+        netMatchedACLs = self.get('netMatchedACLs')
+        for aclkey in self.get('aclEntries').keys():
+            acl = self.get('aclEntries')[aclkey]
+            match = acl.destinationMatches(oldCIDR)
+            # make sure it is the top level ACL being updated
+            if aclkey % 1 != 0:
+                acl = self.get('aclEntries')[int(aclkey)]
+            if match:
+                acl.updateDestinationIP(newCIDR)
+                if match == 'exact':
+                    exactMatchedACLs.append(int(aclkey))
+                else:
+                    netMatchedACLs.append(int(aclkey))
+
+    def getexactMatchedACLs(self):
+        if 'exactMatchedACLs' in self.keys():
+            return set(self.get('exactMatchedACLs'))
+
+    def getnetMatchedACLs(self):
+        if 'netMatchedACLs' in self.keys():
+            return set(self.get('netMatchedACLs'))
+
+    def getUpdatedACLs(self):
+        aclEntries = self.get('aclEntries')
+        retList = []
+
+        allKeys = set([])
+        if 'exactMatchedACLs' in self.keys():
+            allKeys = allKeys.union(set(self.getexactMatchedACLs()))
+        if 'netMatchedACLs' in self.keys():
+            allKeys = allKeys.union(set(self.getnetMatchedACLs()))
+
+        allKeys = sorted(allKeys, reverse=True)
+
+        for key in allKeys:
+            if key in self.getexactMatchedACLs():
+                retList.append(aclEntries[key].getInactive())
+                retList.append(aclEntries[key].remark('Migration: Made inactive as exact replacement was found'))
+                newRules = aclEntries[key].getUpdatedACLs()
+                retList.extend(newRules)
+                if not newRules[0].startswith('object-group'):
+                    retList.append(aclEntries[key].remark('Migration: Next {} rules(s) added as part of the migration'.format(len(newRules))))
+            elif key in self.getnetMatchedACLs():
+                retList.append(aclEntries[key].remark('Migration: More specific entries needed, original left intact'))
+                newRules = aclEntries[key].getUpdatedACLs()
+                retList.extend(newRules)
+                retList.extend(aclEntries[key].getUpdatedACLs())
+                if not newRules[0].startswith('object-group'):
+                    retList.append(aclEntries[key].remark('Migration: Next {} rules(s) added as part of the migration'.format(len(newRules))))
+
+
+        if len(retList) > 0:
+            print '\n'.join(retList)
 
     def __repr__(self):
         returnStringList = []
@@ -186,16 +257,24 @@ class ACEObject(dict):
         return False
 
     def getTestResult(self, version=None):
-        return {'action': 'N/A', 'reason': '', 'rawResult': ''}
+        tResults = TestResult().getReportTemplate()
+        tResults.update({'Action': 'N/A'})
+        return tResults
 
     def setTestResult(self, version, testResult):
         return None
+
+    def compareResults(self, version, testResult):
+        return "N/A"
 
     def getDestinationIP(self):
         return None
 
     def getACEDetails(self):
         return None
+
+    def destinationMatches(self, ip, protocol=None, port=None):
+        return False
 
 class ACEInformational (ACEObject):
 
@@ -307,7 +386,7 @@ class ACEExtended (ACEObject):
                 else:
                     options.update({part: True})
             elif re.match(r'\(hitcnt=\d+\)', part):
-                self.setUnitTest()
+                self.update({'unitTest': ACLUnitTest(self)})
             elif re.match(r'^0x[a-fA-F0-9]{1,8}$', part):
                 pass
             elif part in ['(inactive)']:
@@ -330,83 +409,39 @@ class ACEExtended (ACEObject):
             return False
 
     def setUnitTest(self):
-        self.update({'unitTest': self._getUnitTest()})
+        if 'unitTest' in self.keys():
+            self.get('unitTest').setUnitTest()
 
     def getUnitTest(self):
-        if not self.get('needsUnitTest'): return
-
-        if 'unitTest' in self.keys():
-            return self.get('unitTest')
+        if self.get('unitTest'):
+            return self.get('unitTest').getUnitTestString()
         else:
-            return self._getUnitTest()
-
+            return 'N/A'
     def needsUnitTest(self, version):
-        if not self.get('needsUnitTest'): return False
-
-        if version in self.get('testResults').keys():
-            return False
+        if 'unitTest' in self.keys():
+            unitTestObj = self.get('unitTest')
+            if version in unitTestObj['versions'].keys():
+                return False
+            else:
+                return True
         else:
-            return True
-
+            return False
 
     def getTestResult(self, version=None):
-        if not self.get('needsUnitTest'):
-            return {'action': 'N/A', 'reason': '', 'rawResult': ''}
+        return self.get('unitTest')['versions'][version].getReport()
 
-        untested = {'action': 'untested', 'reason': '', 'rawResult': ''}
-        if 'testResults' in self.keys():
-            if version is not None:
-                if version in self.get('testResults').keys():
-                    return self.get('testResults')[version]
-                else:
-                    return untested
-            else:
-                return self.get('testResults')
+    def compareResults(self, baselineVersion, version):
+        v = self.get('unitTest')['versions']
+        bSummary = v[baselineVersion].getSummary()
+        vSummary = v[version].getSummary()
+
+        if set(bSummary.items()) == set(vSummary.items()):
+            return 'same'
         else:
-            return untested
+            return 'different'
 
     def setTestResult(self, version, testResult):
-        self.get('testResults').update({version: testResult})
-
-    def _getUnitTest(self):
-        interface = self.get('parentObj')['interface']
-        interfaceCIDRList = self.get('parentObj')['interfaceCIDRList']
-        srcObj = self.get('source')
-        dstObj = self.get('destination')
-        protocol = self.get('protocol')
-        srcIP = ASAInfo.getUnitTestIP(srcObj, interfaceCIDRList)
-        dstIP = ASAInfo.getUnitTestIP(dstObj, ['8.8.8.8/32'])
-
-        if protocol in ['tcp', 'udp']:
-            srcPort = ASAInfo.getUnitTestPort(srcObj)
-            dstPort = ASAInfo.getUnitTestPort(dstObj)
-
-            return "packet-tracer input {} {} {} {} {} {} xml".format(
-                                                            interface,
-                                                            protocol,
-                                                            srcIP, srcPort,
-                                                            dstIP, dstPort)
-        elif protocol in ['icmp']:
-            icmpObj = self.get('icmpType')
-            if 'icmpType' in self.keys():
-                icmpType, icmpCode = ASAInfo.getUnitTestICMP(icmpObj)
-            else:
-                icmpType = '0'
-                icmpCode = '0'
-
-            return "packet-tracer input {} icmp {} {} {} {} xml".format(
-                                                            interface, srcIP,
-                                                            icmpType, icmpCode,
-                                                            dstIP)
-        elif protocol in ['ip']:
-            return "packet-tracer input {} icmp {} 8 0 {} xml".format(
-                                                            interface, srcIP,
-                                                            dstIP)
-        else:
-            protocol = ASAInfo.resolveIPProtocolType(protocol)
-            return "packet-tracer input rawip {} {} {} {} xml".format(
-                                                            interface, srcIP,
-                                                            protocol, dstIP)
+        self.get('unitTest').addTestResult(version, testResult)
 
     def getDestinationIP(self):
         return ipUtils.randomFromCIDRAddress(self.get('destination')['cidr'])
@@ -422,14 +457,70 @@ class ACEExtended (ACEObject):
 
         return {'protocol': prot, 'source': src, 'destination': dst}
 
+    def destinationMatches(self, cidr, protocol=None, port=None):
+        dObj = self.get('destination')
+        return dObj.matches(cidr)
+
+    def updateDestinationIP(self, cidr):
+
+        if 'newIPs' not in self.keys():
+            self.update({'newIPs': {}})
+        self.get('newIPs').update({cidr: True})
+
+    def remark(self, string):
+        return 'access-list {} line {} remark {}'.format( self.get('AclName'),
+                                                          self.get('lineNum'),
+                                                       string)
+
+    def getUpdatedACLs(self):
+        retList = []
+        if 'protocol-object' in self.keys():
+            protocol = "object-group {}".format(self.get('protocol-object'))
+        elif 'service-object' in self.keys():
+            protocol = "object-group {}".format(self.get('service-object'))
+        else:
+            protocol = self.get('protocol')
+        aclString = 'access-list {} line {} extended {} {} {} {}'
+        nwObjString = ' network-object {} {}'
+        dObj = self.get('destination')
+        if 'network-object' in dObj:
+            objGrp = True
+            retList.append('object-group network {}'.format(dObj.get('network-object')))
+        else:
+            objGrp = False
+        for cidr in self.get('newIPs').keys():
+            if objGrp:
+                network, prefixLen = cidr.split('/')
+                netmask = ipUtils.netmaskFromPrefixLength(prefixLen)
+                string = nwObjString.format(network, netmask)
+            else:
+                newDest = copy.deepcopy(self.get('destination'))
+                newDest.updateNetwork(cidr)
+                string = aclString.format(self.get('AclName'), self.get('lineNum'),
+                                             self.get('action'), protocol,
+                                             self.get('source'), newDest)
+            retList.append(string)
+        return retList
+
+    def getInactive(self):
+        s = self.__repr__()
+        return s + " inactive"
+
 
     def __str__(self):
         return self.__repr__()
 
     def __repr__(self):
-        string = 'access-list {} line {} extended {} {} {}'.format( self.get('AclName'),
+        if 'protocol-object' in self.keys():
+            protocol = "object-group {}".format(self.get('protocol-object'))
+        elif 'service-object' in self.keys():
+            protocol = "object-group {}".format(self.get('service-object'))
+        else:
+            protocol = self.get('protocol')
+        string = 'access-list {} line {} extended {} {} {} {}'.format( self.get('AclName'),
                                                                     self.get('lineNum'),
-                                                                    self.get('protocol'),
+                                                                    self.get('action'),
+                                                                    protocol,
                                                                     self.get('source'),
                                                                     self.get('destination'))
         if 'icmpType' in self.keys():
@@ -484,6 +575,26 @@ class ACESrcDst(dict):
 
         return d
 
+    def matches(self, cidr, protocol=None, port=None):
+        if self.get('network-object'):
+            return False
+
+        if port is not None and self.get('service-object'):
+            return False
+
+        if self.get('any') is not None:
+            return False
+
+        return ipUtils.CIDRMatch(cidr, self.get('cidr'))
+
+    def updateNetwork(self, cidr):
+        network, prefixLen = cidr.split('/')
+        netmask = ipUtils.netmaskFromPrefixLength(prefixLen)
+        self.update({'network': network,
+                     'netmask': netmask})
+        if prefixLen == '32':
+            self.update({'host': True})
+
     def __repr__(self):
         if 'network-object' in self.keys():
             s = 'object-group {}'.format(self.get('network-object'))
@@ -523,3 +634,270 @@ class ACEICMP(dict):
             if 'icmpCode' in self.keys():
                 s = s + ' {}'.format(self.get('icmpCode'))
         return s
+
+class ACLUnitTest(dict):
+    def __init__(self, aceObj):
+        self.update({'aceObj': aceObj})
+        self.update({'versions': {}})
+        self.update({'testParams': {}})
+
+    def hasUnitTest(self, version):
+        if version in self.get('versions').keys():
+            return False
+        else:
+            return True
+
+    def needsUnitTestSet(self):
+        if len(self.get('testParams').keys()) > 0:
+            return False
+        else:
+            return True
+
+    def setUnitTest(self):
+        if len(self.get('testParams').keys()) > 0:
+            # if it already has parameters set, don't override them
+            return
+
+        aceObj = self.get('aceObj')
+        aclObj = aceObj['parentObj']
+        testParams = self.get('testParams')
+        interface = aclObj['interface']
+        interfaceCIDRList = aclObj['interfaceCIDRList']
+        srcObj = aceObj.get('source')
+        dstObj = aceObj.get('destination')
+        protocol = aceObj.get('protocol')
+
+        testParams.update({'interface': interface})
+
+        srcIP = ASAInfo.getUnitTestIP(srcObj, interfaceCIDRList)
+        dstIP = ASAInfo.getUnitTestIP(dstObj, ['8.8.8.8/32'])
+        testParams.update({'srcIP': srcIP, 'dstIP': dstIP})
+        if protocol in ['tcp', 'udp']:
+            testParams.update({'protocol': protocol})
+            srcPort = ASAInfo.getUnitTestPort(srcObj)
+            dstPort = ASAInfo.getUnitTestPort(dstObj)
+            testParams.update({'srcPort': srcPort, 'dstPort': dstPort})
+        elif protocol in ['icmp', 'ip']:
+            # Use ping test for "ip" based rules
+            testParams.update({'protocol': 'icmp'})
+            if 'icmpType' in aceObj.keys():
+                icmpObj = aceObj.get('icmpType')
+                icmpType, icmpCode = ASAInfo.getUnitTestICMP(icmpObj)
+            else:
+                icmpType = '8'
+                icmpCode = '0'
+            testParams.update({'icmpType': icmpType, 'icmpCode': icmpCode})
+        else:
+            protocol = ASAInfo.resolveIPProtocolType(protocol)
+            testParams.update({'protocol': protocol})
+
+    def addTestResult(self, version, results):
+        versions = self.get('versions')
+        versions.update({'status': results['status']})
+        if results['status'] == 'ok':
+            versions.update({version: TestResult(results['resultXML'],
+                                             self.get('testParams'))})
+        else:
+            versions.update({version: TestResult("Syntax Error",
+                                             self.get('testParams'))})
+    def getTestResult(self, version):
+        return self.get('versions')[version].getReport()
+
+    def getUnitTestString(self):
+        tcpudp = "packet-tracer input {interface} {protocol} {srcIP} {srcPort} {dstIP} {dstPort} xml"
+        icmp = "packet-tracer input {interface} icmp {srcIP} {icmpType} {icmpCode} {dstIP} xml"
+        other = "packet-tracer input {interface} rawip {srcIP} {protocol} {dstIP} xml"
+        testParams = self.get('testParams')
+        if testParams['protocol'] in ['tcp', 'udp']:
+            return tcpudp.format(**testParams)
+        if testParams['protocol'] == 'icmp':
+            return icmp.format(**testParams)
+        else:
+            return other.format(**testParams)
+
+class TestResult(dict):
+
+    def __init__(self, result=None, testParams=None):
+        if result is not None and testParams is not None:
+            self._processResult(result, testParams)
+        else:
+            if not result:
+                "no result given"
+
+            if not testParams:
+                "no params given"
+
+    def _processResult(self, result, testParams):
+        if result == "Syntax Error":
+            self.update({'action': result})
+            return
+
+        self.update({'testParams': testParams})
+        soup = BeautifulSoup('<data>'+result+'</data>','xml')
+        aclType=re.compile('(?i)access-list')
+        natType=re.compile('(?i)nat')
+        badSubType = re.compile(r'(?i)(rpf-check)|(host-limits)')
+        phaseAllow = re.compile(r'(?i)allow')
+        result = soup.findChildren('result')[-1]
+        self.update({'action': result.action.text})
+        phases = soup.findAll('Phase')
+        if self.get('action') == 'drop':
+            dropReason = result.find('drop-reason').text
+            dropCode = re.search(r'\(([^\)]+)\)', dropReason).group(1)
+            self.update({'dropReason': dropReason})
+            self.update({'dropCode': dropCode})
+
+        if result.find('input-interface'):
+            self.update({'ingressInt': result.find('input-interface').text})
+        if result.find('output-interface'):
+            self.update({'egressInt': result.find('output-interface').text})
+
+        # Grab the ACL Information
+        aclText = [p.config.text.strip() for p in phases if aclType.search(p.type.text)]
+        if len(aclText) > 0:
+            # Replace newlines with :
+            aclText = re.sub(r'[\n\r]+', ': ', aclText[0])
+            self.update({'aclText': aclText})
+
+
+        '''
+        this is a regular expression to capture the from ip(1)/port(2), to ip(3)/port(4)
+        and optional netmask(5), examples below:
+        Untranslate 203.202.141.0/0 to 203.202.141.0/0 using netmask 255.255.255.128
+        Static translate 2.3.5.199/0 to 10.137.93.11/0 using netmask 255.255.255.255
+        Static translate 2.3.5.199/1025 to 10.137.93.11/1025
+        '''
+        NATExtract = re.compile(r'((?:\d{1,3}\.){3}\d{1,3})/(\d+)\s+to\s+((?:\d{1,3}\.){3}\d{1,3})/(\d+)(?:\s+using\s+netmask\s+((?:\d{1,3}\.){3}\d{1,3}))?')
+
+        NATTranslations = [({'type': p.type.text,
+                   'subtype': p.subtype.text,
+                   'extra': p.extra.text})
+                        for p in soup.findAll('Phase') \
+                            if natType.search(p.type.text) and \
+                            not badSubType.search(p.subtype.text) and \
+                            phaseAllow.search(p.result.text)]
+        for translation in NATTranslations:
+            m = NATExtract.search(translation['extra'])
+            fromInfo = m.group(1,2)
+            toInfo = m.group(3,4)
+            netmask = m.group(5)
+            # If fromInto and toInfo are not the same, translation is ocurring
+            if set(fromInfo) != set(toInfo):
+                match = self.matchesSrcOrDstIP(fromInfo[0], netmask)
+                matchKey = match + 'NAT'
+                if match == 'both':
+                    "have a both match!"
+                    print self.get('testParams')
+                self.update({matchKey: {}})
+                self.get(matchKey).update({'ip': self.translate(fromInfo[0],
+                                                                toInfo[0],
+                                                                netmask)})
+                if fromInfo[1] != toInfo[1]:
+                    self.get(matchKey).update({'port': toInfo[1]})
+
+    def getReportHeaders(self):
+        return ['Ingress Int',
+                'Egress Int',
+                'Action',
+                'NAT Info',
+                'Drop Code',
+                'Drop Reason',
+                'ACL Text']
+
+    def getReportTemplate(self):
+        t = {}
+        for h in self.getReportHeaders():
+            t.update({h: ''})
+        return t
+
+    def getReport(self):
+        report = self.getReportTemplate()
+        if not self.get('action'):
+            report.update({'Action': 'untested'})
+            return report
+
+        report.update({'Ingress Int': self.xstr(self.get('ingressInt'))})
+        report.update({'Egress Int': self.xstr(self.get('egressInt'))})
+        report.update({'Action': self.xstr(self.get('action'))})
+        report.update({'Drop Code': self.xstr(self.get('dropCode'))})
+        report.update({'Drop Reason': self.xstr(self.get('dropReason'))})
+        report.update({'ACL Text': self.xstr(self.get('aclText'))})
+        s = ''
+        if self.get('sourceNAT'):
+            origIP = self.get('testParams')['srcIP']
+            newIP = self.get('sourceNAT').get('ip')
+            origPort = ''
+            newPort = ''
+            if self.get('sourceNAT').get('port'):
+                origPort = ":{}".format(self.get('testParams')['srcPort'])
+                newPort = ":{}".format(self.get('sourceNAT').get('port'))
+            s = s+ 'srcNAT: {}{}->{}{}'.format(origIP, origPort, newIP, newPort)
+
+        if self.get('destinationNAT'):
+            if len(s) > 0:
+                s = s + ' '
+            origIP = self.get('testParams')['dstIP']
+            newIP = self.get('destinationNAT').get('ip')
+            origPort = ''
+            newPort = ''
+            if self.get('destinationNAT').get('port'):
+                origPort = ":{}".format(self.get('testParams')['dstPort'])
+                newPort = ":{}".format(self.get('destinationNAT').get('port'))
+            s = s + 'dstNAT: {}{}->{}{}'.format(origIP, origPort, newIP, newPort)
+
+        report.update({'NAT Info': s})
+        return report
+
+    def getSummary(self):
+        summary = self.getReport()
+        # Remove un needed keys
+        for k in ['Drop Reason', 'ACL Text']:
+            summary.pop(k, None)
+
+        return summary
+
+    def xstr(self, s):
+        if s is None:
+            return ''
+        else:
+            return str(s)
+
+    def translate(self, ip, network, netmask):
+        if netmask is None or netmask == '255.255.255.255':
+            # No translation is happening, network is final IP
+            return network
+
+        # Convert mask and network to int (validate the network based on mask)
+        maskInt = ipUtils.aton(netmask)
+        networkInt = ipUtils.aton(network) & maskInt
+        # Work out the host mask
+        hostBits = ~maskInt + 2**32
+        # Get the host bits
+        hostInt = ipUtils.aton(ip) & hostBits
+        # Return the new IP address
+        return ipUtils.ntoa(networkInt + hostInt)
+
+    def matchesSrcOrDstIP(self, ip, netmask):
+        if netmask is None:
+            # Assume 32 bit mask if not supplied
+            netmask = '255.255.255.255'
+        ipInt = ipUtils.aton(ip)
+        maskInt = ipUtils.aton(netmask)
+        #print self.keys()
+        srcIPInt = ipUtils.aton(self.get('testParams')['srcIP'])
+        dstIPInt = ipUtils.aton(self.get('testParams')['dstIP'])
+        matchesSrc = False
+        matchesDst = False
+        if ipInt & maskInt == srcIPInt & maskInt:
+            matchesSrc = True
+        if ipInt & maskInt == dstIPInt & maskInt:
+            matchesDst = True
+
+        if matchesSrc and matchesDst:
+            return 'both'
+        elif matchesSrc:
+            return 'source'
+        elif matchesDst:
+            return 'destination'
+        else:
+            return None

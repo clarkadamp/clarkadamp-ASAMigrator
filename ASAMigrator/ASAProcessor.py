@@ -12,6 +12,7 @@ from ipUtils import *
 class ASAProcessor():
 
     config = {'source': 'ASAProcessor'}
+    config['baselineVersion'] = None
     config['osVersions'] = []
     config['interfaceMappings'] = {}
     config['accessLists'] = {}
@@ -19,7 +20,7 @@ class ASAProcessor():
 
     stateSave = 'ASAProcessorState.pkl'
     useCache = True
-    iOverride = ['ahm']
+    #iOverride = ['outside']
 
 
     def __init__(self, i, saveState=True):
@@ -61,10 +62,14 @@ class ASAProcessor():
             newlst.append(lst[i])
         return newlst
 
-    def updateOsVersions(self):
+    def updateOsVersions(self, isBaseline=False):
         showVer = self.interactor.runcmd('show version')
         version = [l for l in showVer if 'Software Version' in l][0].split()[-1]
         version = re.sub(r'[()]', '', version)
+        if isBaseline:
+            self.config['baselineVersion'] = version
+        if 'baselineVersion' not in self.config.keys():
+            self.config['baselineVersion'] = '8.02'
         self.config['osVersions'].append(version)
         self.config['osVersions'] = list(set(self.config['osVersions']))
         self.config['osVersions'].sort()
@@ -101,7 +106,6 @@ class ASAProcessor():
                     if a not in accessLists.keys()]
         else:
             ACLs = self.getAccessLists()
-
         for ACL in ACLs:
             aclList = self.getShowAccessList(ACL)
             aclObj = AsaAcl(aclList, objGrpObj)
@@ -110,28 +114,27 @@ class ASAProcessor():
     def updateAccessGroupMappings(self):
         accessGroupCfgLst = self.interactor.runcmd('show running-config access-group')
         accessGroupCfgLst = self._listFilter(accessGroupCfgLst, r'^access')
-        agm = {}
+
         accessLists = self.config['accessLists']
+        iMappings = self.config['interfaceMappings']
         for item in accessGroupCfgLst:
             parts = item.split()
             ACLName = parts[1]
             interface = parts[4]
-            if interface in self.config['interfaceMappings'].keys():
-                pass
-            else:
-                agm.update({interface: {'acl': ACLName}})
-                agm.update({interface: {'aclObj': accessLists[ACLName]}})
-                self.config['interfaceMappings'].update(agm)
+            #if interface in self.config['interfaceMappings'].keys():
+            #    pass
+            #else:
+            iMappings.update({interface: {'acl': ACLName,
+                                          'aclObj': accessLists[ACLName]}})
 
     def prepareUnitTests(self):
-        if hasattr(self, 'iOverride'):
-            interfaces = self.iOverride
-        else:
-            interfaces = self._getUnitTestInterfaceObjects()
-
+        interfaces = self._getUnitTestInterfaceNames()
+        iMappings = self.config['interfaceMappings']
+        #for i in iMappings:
+        #    print type(i)
         r = self.config['routeTable']
-        for interface in interfaces:
-            aclObj = self.config['accessLists'][interface]
+        for interface in iMappings.keys():
+            aclObj = iMappings[interface]['aclObj']
             aclObj.setInterface(interface)
             aclObj.setInterfaceCIDRList(r.getCIDRbyInterface(interface))
             aclObj.setUnitTests()
@@ -194,11 +197,22 @@ class ASAProcessor():
         if hasattr(self, 'iOverride'):
             interfaces = self.iOverride
 
-        string = '"Interface","Test","ACL","Unit Test"'
-        for version in self.config['osVersions']:
-            string = string + ',"{} action","{} reason"'.format(version, version)
+        baselineVersion = self.config.get('baselineVersion')
+        reports = ['"Baseline Version","{}"'.format(baselineVersion)]
 
-        reports = [string]
+        titleString = '"Interface","Test","ACL","Unit Test"'
+        testHeaders = TestResult().getReportHeaders()
+
+        for version in self.config['osVersions']:
+            s = ''
+            for h in testHeaders:
+                s = s + ',"{} {}"'.format(version, h)
+            titleString = titleString + s
+            if baselineVersion != version:
+                    titleString = titleString + ',"Behaviour {}/{}"'.format(baselineVersion,version)
+
+        reports.append(titleString)
+
         for interface in interfaces:
             if 'aclObj' not in iMappings[interface].keys():
                 continue
@@ -206,9 +220,21 @@ class ASAProcessor():
             aclObj = iMappings[interface]['aclObj']
 
             #print "Unit Test Report for {}".format(interface)
-            reports.append(aclObj.getTestReport(self.config['osVersions']))
+            reports.append(aclObj.getTestReport(self.config['osVersions'],
+                                                baselineVersion))
 
         return '\n'.join(reports)
+
+    def _getUnitTestInterfaceNames(self):
+        iMappings = self.config['interfaceMappings']
+        if hasattr(self, 'iOverride'):
+            interfaces = self.iOverride
+        else:
+            interfaces = iMappings.keys()
+
+        ifaceNameList = [iMappings[i]['aclObj'] for i in interfaces
+                         if 'aclObj' in iMappings[i].keys()]
+        return ifaceNameList
 
     def _getUnitTestInterfaceObjects(self):
         iMappings = self.config['interfaceMappings']
@@ -219,7 +245,6 @@ class ASAProcessor():
 
         ifaceObjList = [iMappings[i]['aclObj'] for i in interfaces
                 if 'aclObj' in iMappings[i].keys()]
-
         return ifaceObjList
 
     def getACLEgressInterfaces(self, aclName):
@@ -374,6 +399,10 @@ class ASAProcessor():
             d.update({'real_svc': realSvcGrp,
                       'mapped_svc': mappedSvcGrp})
         natObj.addStaticNAT(**d)
+        # Hook into Access Lists to update to reflect new destination
+        ACL = self.config['interfaceMappings'][snatObj['mappedifc']]['aclObj']
+        ACL.changeDestinationIP(mcidr, rcidr)
+
 
     def _processPolicyStaticNAT(self, snatObj):
         objGrpObj = self.config['objectGroups']
@@ -468,12 +497,19 @@ class ASAProcessor():
                 kwargs.update({'endPort': sd['portEnd']})
             service = objGrpObj.createServiceGroup(**kwargs)
         elif prot['protocol'] not in ['tcp', 'udp']:
-            kwargs = {'protocol': prot['protocol']}
-            service = objGrpObj.createServiceGroup(**kwargs)
+            service = None
         else:
             service = None
 
         return address, service
+
+    def getUpdatedACLs(self):
+        accessLists = self.config['accessLists']
+        #exactMatchedACLs = self.get('exactMatchedACLs')
+        #netMatchedACLs = self.get('netMatchedACLs')
+        for acl in accessLists:
+            accessLists[acl].getUpdatedACLs()
+
 
     def _processSNATGlobal(self, d):
         objGrpObj = self.config['objectGroups']
