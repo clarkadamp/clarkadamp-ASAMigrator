@@ -221,7 +221,19 @@ class AsaAcl (dict):
 
 
         if len(retList) > 0:
-            print '\n'.join(retList)
+            return '\n'.join(retList)
+
+    def rawTestResults(self):
+        AEObj = self.get('aclEntries')
+        for aclKey in AEObj:
+            if 'unitTest' in AEObj[aclKey].keys():
+                utVers = AEObj[aclKey]['unitTest']['versions']
+                for version in utVers.keys():
+                    if version == 'status':
+                        continue
+                    result = utVers[version].getRawResult()
+                    if result is not None:
+                        yield aclKey, version, result
 
     def __repr__(self):
         returnStringList = []
@@ -276,6 +288,8 @@ class ACEObject(dict):
     def destinationMatches(self, ip, protocol=None, port=None):
         return False
 
+    def hasTestResult(self, version):
+        return False
 class ACEInformational (ACEObject):
 
     def __init__(self, AclObj, l, t, s):
@@ -427,6 +441,12 @@ class ACEExtended (ACEObject):
         else:
             return False
 
+    def getRawResult(self, version):
+        if version in self.get('unitTest')['versions']:
+            return self.get('unitTest')['versions'][version].getRawResult()
+        else:
+            return None
+
     def getTestResult(self, version=None):
         return self.get('unitTest')['versions'][version].getReport()
 
@@ -438,7 +458,13 @@ class ACEExtended (ACEObject):
         if set(bSummary.items()) == set(vSummary.items()):
             return 'same'
         else:
-            return 'different'
+            majorHeaders = set(['Ingress Int', 'Egress Int', 'Action',
+                                'NAT Info', 'Drop Code'])
+            diffLst = []
+            for h in majorHeaders:
+                if bSummary[h] != vSummary[h]:
+                    diffLst.append(h)
+            return 'different ({})'.format(', '.join(diffLst))
 
     def setTestResult(self, version, testResult):
         self.get('unitTest').addTestResult(version, testResult)
@@ -695,8 +721,8 @@ class ACLUnitTest(dict):
         versions = self.get('versions')
         versions.update({'status': results['status']})
         if results['status'] == 'ok':
-            versions.update({version: TestResult(results['resultXML'],
-                                             self.get('testParams'))})
+            t = TestResult(results['resultXML'], self.get('testParams'))
+            versions.update({version: t})
         else:
             versions.update({version: TestResult("Syntax Error",
                                              self.get('testParams'))})
@@ -732,18 +758,29 @@ class TestResult(dict):
             self.update({'action': result})
             return
 
+        self.update({'rawResult': result})
         self.update({'testParams': testParams})
         soup = BeautifulSoup('<data>'+result+'</data>','xml')
         aclType=re.compile('(?i)access-list')
         natType=re.compile('(?i)nat')
-        badSubType = re.compile(r'(?i)(rpf-check)|(host-limits)')
+        badSubType = re.compile(r'(?i)(rpf-check)|(host-limits)|(NAT-EXEMPT)')
         phaseAllow = re.compile(r'(?i)allow')
+        phaseDrop = re.compile(r'(?i)drop')
         result = soup.findChildren('result')[-1]
         self.update({'action': result.action.text})
         phases = soup.findAll('Phase')
         if self.get('action') == 'drop':
             dropReason = result.find('drop-reason').text
             dropCode = re.search(r'\(([^\)]+)\)', dropReason).group(1)
+            # Identify the section
+            dropSections = [(p.type.text, p.subtype.text)
+                            for p in phases if phaseDrop.search(p.result.text)]
+            if len(dropSections) > 0:
+                dropExtra = '{}'.format(dropSections[0][0])
+                if dropSections[0][1] != '':
+                    dropExtra = dropExtra + '/{}'.format(dropSections[0][1])
+                dropExtra = dropExtra + ': '
+                dropReason = dropExtra + dropReason
             self.update({'dropReason': dropReason})
             self.update({'dropCode': dropCode})
 
@@ -758,7 +795,6 @@ class TestResult(dict):
             # Replace newlines with :
             aclText = re.sub(r'[\n\r]+', ': ', aclText[0])
             self.update({'aclText': aclText})
-
 
         '''
         this is a regular expression to capture the from ip(1)/port(2), to ip(3)/port(4)
@@ -778,6 +814,9 @@ class TestResult(dict):
                             phaseAllow.search(p.result.text)]
         for translation in NATTranslations:
             m = NATExtract.search(translation['extra'])
+            if m is None:
+                # No translations
+                continue
             fromInfo = m.group(1,2)
             toInfo = m.group(3,4)
             netmask = m.group(5)
@@ -815,38 +854,60 @@ class TestResult(dict):
         if not self.get('action'):
             report.update({'Action': 'untested'})
             return report
-
+        testParams = self.get('testParams')
         report.update({'Ingress Int': self.xstr(self.get('ingressInt'))})
         report.update({'Egress Int': self.xstr(self.get('egressInt'))})
         report.update({'Action': self.xstr(self.get('action'))})
         report.update({'Drop Code': self.xstr(self.get('dropCode'))})
         report.update({'Drop Reason': self.xstr(self.get('dropReason'))})
         report.update({'ACL Text': self.xstr(self.get('aclText'))})
+
+        sNAT = self.getSrcNATBehaviour()
+        dNAT = self.getDstNATBehaviour()
+
+        report.update({'NAT Info': ' '.join([sNAT, dNAT])})
+        return report
+
+    def getRawResult(self):
+        if self.get('rawResult'):
+            return self.get('rawResult')
+        else:
+            return "No raw result recorded"
+
+    def getSrcNATBehaviour(self):
         s = ''
         if self.get('sourceNAT'):
             origIP = self.get('testParams')['srcIP']
             newIP = self.get('sourceNAT').get('ip')
             origPort = ''
             newPort = ''
-            if self.get('sourceNAT').get('port'):
-                origPort = ":{}".format(self.get('testParams')['srcPort'])
+            ''' Kind of silly old school never really did source nat of ports
+            if self.get('sourceNAT').get('port') and \
+                    testParams['protocol'] in ['tcp','udp']:
+                origPort = ":{}".format(testParams['srcPort'])
                 newPort = ":{}".format(self.get('sourceNAT').get('port'))
+            '''
             s = s+ 'srcNAT: {}{}->{}{}'.format(origIP, origPort, newIP, newPort)
 
+        return s
+
+    def getDstNATBehaviour(self):
+        testParams = self.get('testParams')
+        s = ''
         if self.get('destinationNAT'):
             if len(s) > 0:
                 s = s + ' '
-            origIP = self.get('testParams')['dstIP']
+            origIP = testParams['dstIP']
             newIP = self.get('destinationNAT').get('ip')
             origPort = ''
             newPort = ''
-            if self.get('destinationNAT').get('port'):
-                origPort = ":{}".format(self.get('testParams')['dstPort'])
+            if self.get('destinationNAT').get('port')and \
+                    testParams['protocol'] in ['tcp','udp']:
+                origPort = ":{}".format(testParams['dstPort'])
                 newPort = ":{}".format(self.get('destinationNAT').get('port'))
             s = s + 'dstNAT: {}{}->{}{}'.format(origIP, origPort, newIP, newPort)
 
-        report.update({'NAT Info': s})
-        return report
+        return s
 
     def getSummary(self):
         summary = self.getReport()

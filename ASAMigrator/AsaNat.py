@@ -163,7 +163,7 @@ class Nat(dict):
         self.get('polcySNAT').append(d)
 
     def getPolicySNATConfig(self):
-        string = 'nat ({},{}) after-auto source {} {} {} destination static {} {}'
+        string = 'nat ({},{}) source {} {} {} destination static {} {}'
         retList = []
         for p in self.get('polcySNAT'):
             s = string.format(p['real_ifc'], p['mapped_ifc'],
@@ -229,7 +229,7 @@ class Nat(dict):
             return
         snatObj = self.get('StaticNAT')
 
-        main = "nat ({},{}) after-auto source static {} {}"
+        main = "nat ({},{}) source static {} {}"
         service = " service {} {}"
 
         retList = []

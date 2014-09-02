@@ -13,18 +13,18 @@ class ASAInteractor (object):
     prompts = []
 
     def __init__(self, hostname, username, password, prompt):
-        self.prompts.append(prompt + '>')
-        self.prompts.append(prompt + '#')
-
-        self.s =  pxssh.pxssh(timeout=5,logfile=self.logfile)
-        self.s.PROMPT = 'prompt' + '>'
-
         self.hostname = hostname
         self.username = username
         self.password = password
+        self.prompts.append(prompt + '>')
+        self.prompts.append(prompt + '#')
 
-    def __enter__(self):
+
+
+    def _connect(self):
         try:
+            self.s =  pxssh.pxssh(timeout=5,logfile=self.logfile)
+            self.s.PROMPT = 'prompt' + '>'
             self.s.login(self.hostname, self.username, self.password,
                          quiet=False, auto_prompt_reset=False,)
             self.s.sendline('login')
@@ -35,12 +35,18 @@ class ASAInteractor (object):
             self.s.expect(self.prompts)
             self.s.sendline('terminal pager 0')
             self.s.expect(self.prompts)
-            return self
+            return True
         except pxssh.ExceptionPxssh as e:
             print("pxssh failed on login.")
             print(e)
-            return None
+            return False
 
+    def __enter__(self):
+        OK = self._connect()
+        if OK:
+            return self
+        else:
+            return None
 
     def __exit__(self, type, value, traceback):
         self.s.logout()
@@ -49,9 +55,21 @@ class ASAInteractor (object):
         if prompt is None:
             prompt = self.prompts
         time1 = time.time()
-        print "executing {}".format(cmd)
-        self.s.sendline(cmd)
-        self.s.expect(prompt, timeout=timeout)
+        numTries = 0
+        cmdExecSuccess = False
+        while numTries <= 3:
+            try:
+                #print "executing {}".format(cmd)
+                self.s.sendline(cmd)
+                self.s.expect(prompt, timeout=timeout)
+                cmdExecSuccess = True
+                break
+            except pexpect.TIMEOUT:
+                numTries += 1
+                print "Reconnecting: {}/{} attempts".format(numTries, 3)
+                self._connect()
+        if not cmdExecSuccess:
+            raise pexpect.TIMEOUT
         time2 = time.time()
         execMs = (time2-time1)*1000.0
         if returnList:

@@ -20,7 +20,7 @@ class ASAProcessor():
 
     stateSave = 'ASAProcessorState.pkl'
     useCache = True
-    #iOverride = ['outside']
+    #iOverride = ['ahm']
 
 
     def __init__(self, i, saveState=True):
@@ -258,9 +258,9 @@ class ASAProcessor():
 
     def updateNAT(self):
 
-        #if len(self.config['nat'].keys()) > 0:
-        #    print 'Using Cached NAT information'
-        #    return
+        if len(self.config['nat'].keys()) > 0:
+            print 'Using Cached NAT information'
+            return
 
         natObj = Nat()
         self._updateGlobals(natObj)
@@ -335,8 +335,9 @@ class ASAProcessor():
 
         # If you are natting to the same IP, new syle does this by default.
         # Filter such incidents
-        useFullNat = [n for n in natObj['static']
-                      if n['mappedIp'] != n['realIP'] ]
+        #useFullNat = [n for n in natObj['static']
+        #              if n['mappedIp'] != n['realIP'] ]
+        useFullNat = natObj['static']
         for n in useFullNat:
                 if 'aclObj' in n.keys():
                     self._processPolicyStaticNAT(n)
@@ -347,10 +348,12 @@ class ASAProcessor():
         objGrpObj = self.config['objectGroups']
         natObj = self.config['nat']
 
-        print objGrpObj.getNewAndMigratedObjects()
-        print natObj.getPolicySNATConfig()
-        print natObj.getSNATConfig()
-        print natObj.getStaticNATConfig()
+        output = [objGrpObj.getNewAndMigratedObjects(),
+                  natObj.getStaticNATConfig(),
+                  natObj.getPolicySNATConfig(),
+                  natObj.getSNATConfig()]
+
+        return '\n'.join(output)
 
     def _processSNAT(self, snatObj):
         objGrpObj = self.config['objectGroups']
@@ -443,7 +446,6 @@ class ASAProcessor():
         globalId = snatObj['id']
         if globalId == '0':
             # Potentially NAT 0 is not needed in new world
-            return
             possibleEgressInts = r.getAllInterfaces()
             NATType = 'static'
         else:
@@ -507,9 +509,11 @@ class ASAProcessor():
         accessLists = self.config['accessLists']
         #exactMatchedACLs = self.get('exactMatchedACLs')
         #netMatchedACLs = self.get('netMatchedACLs')
+        aclUpdates = []
         for acl in accessLists:
-            accessLists[acl].getUpdatedACLs()
+            aclUpdates.append(accessLists[acl].getUpdatedACLs())
 
+        return '\n'.join(aclUpdates)
 
     def _processSNATGlobal(self, d):
         objGrpObj = self.config['objectGroups']
@@ -519,6 +523,28 @@ class ASAProcessor():
             cidr = ipUtils.CIDRfromNetworkNetmask(d['network'], d['netmask'])
             d.update({'cidr': cidr})
             return objGrpObj.createNetworkGroup(**d)
+
+    def exportRawResults(self, reportObj):
+        iMappings = self.config['interfaceMappings']
+        interfaces = iMappings.keys()
+        if hasattr(self, 'iOverride'):
+            interfaces = self.iOverride
+
+        for interface in interfaces:
+            if 'aclObj' not in iMappings[interface].keys():
+                continue
+
+            aclObj = iMappings[interface]['aclObj']
+
+            for aclKey, version ,result in aclObj.rawTestResults():
+                if isinstance(aclKey, float):
+                    aclKey = "{:.3f}".format(aclKey)
+                else:
+                    aclKey = "{}".format(aclKey)
+
+                reportObj.writeACLRawResults(aclObj['name'], aclKey, version,
+                                            result)
+
 
     def pp(self,a):
         import pprint

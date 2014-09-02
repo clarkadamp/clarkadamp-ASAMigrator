@@ -20,12 +20,12 @@ It defines classes_and_methods
 import re
 import sys
 import os
-
 from argparse import ArgumentParser
 from argparse import RawDescriptionHelpFormatter
 
 from ASAMigrator.ASAInteractor import *
 from ASAMigrator.ASAProcessor import *
+from ASAMigrator.reporter import *
 
 __all__ = []
 __version__ = 0.1
@@ -65,17 +65,15 @@ def startProcessor(ASAi=None, **kwargs):
                 ASAp.prepareUnitTests()
                 ASAp.performUnitTests()
         if kwargs['report'] is not None:
-            print ASAp.getUnitTestReports()
-
-
-        if False:
+            r = reporter(kwargs['report'])
+            r.writeReport(ASAp.getUnitTestReports())
+            ASAp.exportRawResults(r)
+        if kwargs['config'] is not None:
             ASAp.processNat()
-            ASAp.getNatConfig()
-            ASAp.getUpdatedACLs()
-
-        #ASAp.test()
-
-        #print ASAp.getACLEgressInterfaces('ahm')
+            NatConfig = ASAp.getNatConfig()
+            #UpdatedsACLs = ASAp.getUpdatedACLs()
+            reporter().writeToFile(kwargs['config'],
+                                '\n'.join([NatConfig]))
 
 def main(argv=None): # IGNORE:C0111
     '''Command line options.'''
@@ -116,9 +114,11 @@ USAGE
         parser.add_argument("-n", "--no-save", dest="noSave", action="store_true", help="Don't save state upon exit")
         parser.add_argument("-i", "--ignore-state", dest="ignoreState", action="store_true", help="Ignore state information")
         parser.add_argument("-u", "--unittests", dest="unitTests", action="store_true", help="Perform ACL Unit Tests against stored state data")
-        parser.add_argument("-r", "--report", dest="report", help="Location for the unit test report [default: %(default)s]", metavar="FILE")
+        parser.add_argument("-r", "--reportDir", dest="report", help="Location for the unit test report directory", metavar="FILE")
+        parser.add_argument('-C', "--config", dest="config", help="File to write migration config to", metavar="FILE")
         parser.add_argument('-P', "--prompt", dest="prompt", help="Command Line Prompt, set via hostname command [default: %(default)s]", metavar="PROMPT", default='ciscoasa')
         parser.add_argument('-c', "--connect", dest="host", help="ASA to connect to", metavar="user:password@host.name")
+
 
         # Process arguments
         args = parser.parse_args()
@@ -129,6 +129,7 @@ USAGE
         kwargs['unitTests'] = args.unitTests
         kwargs['report'] = args.report
         kwargs['connect'] = args.host
+        kwargs['config'] = args.config
 
     except KeyboardInterrupt:
         ### handle keyboard interrupt ###
