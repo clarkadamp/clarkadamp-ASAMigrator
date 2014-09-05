@@ -74,6 +74,7 @@ def startProcessor(ASAi=None, **kwargs):
             #UpdatedsACLs = ASAp.getUpdatedACLs()
             reporter().writeToFile(kwargs['config'],
                                 '\n'.join([NatConfig]))
+        #ASAp.test()
 
 def main(argv=None): # IGNORE:C0111
     '''Command line options.'''

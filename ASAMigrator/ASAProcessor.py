@@ -545,8 +545,12 @@ class ASAProcessor():
                 reportObj.writeACLRawResults(aclObj['name'], aclKey, version,
                                             result)
 
+    def test(self):
+        accessLists = self.config['accessLists']
+        r = self.config['routeTable']
+        print accessLists['HPOO_NAT'].getDestinationInterfaces(r)
 
-    def pp(self,a):
+    def pp(self, a):
         import pprint
         pp = pprint.PrettyPrinter(indent=4)
         pp.pprint(a)

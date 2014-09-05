@@ -143,11 +143,14 @@ class AsaAcl (dict):
             keys = AEObj.keys()
         for k in keys:
             destObj = AEObj[k].get('destination')
-            if destObj is not None and 'cidr' in destObj.keys():
+            if destObj is not None and 'any' in destObj.keys():
+                iList.extend(r.getAllInterfaces())
+            elif destObj is not None and 'cidr' in destObj.keys():
                 cidr = ipUtils.randomFromCIDRAddress(destObj['cidr'])
                 i = r.getInterface(cidr)
                 if i is not None:
                     iList.append(i)
+
 
         return set(iList)
 
@@ -805,34 +808,76 @@ class TestResult(dict):
         '''
         NATExtract = re.compile(r'((?:\d{1,3}\.){3}\d{1,3})/(\d+)\s+to\s+((?:\d{1,3}\.){3}\d{1,3})/(\d+)(?:\s+using\s+netmask\s+((?:\d{1,3}\.){3}\d{1,3}))?')
 
+        '''
+        Only relevant for < 8.3:
+        these are regular expressions to capture the change in source IP from
+        the examples below:
+        nat (PoweronMgmt) 1 10.111.33.0 255.255.255.128
+          match ip PoweronMgmt 10.111.33.0 255.255.255.128 outside any
+            dynamic translation to pool 1 (61.88.171.148 [Interface PAT])
+            translate_hits = 15, untranslate_hits = 0
+
+        static (AW_EMC,MDNS) 161.43.223.10 161.43.223.10 netmask 255.255.255.255
+          match ip AW_EMC host 161.43.223.10 MDNS any
+            static translation to 161.43.223.10
+            translate_hits = 0, untranslate_hits = 0
+
+        need to compare the address from the match line and capture the new
+        address from the pool
+        '''
+        s = r'\s+match\s+ip\s+' + self.get('ingressInt') + r'\s+((?:(?:\d{1,3}\.){3}\d{1,3})|(?:host))\s+((?:\d{1,3}\.){3}\d{1,3})'
+        DynNATExtract = re.compile(r'\s+(?:(?:dynamic)|(?:static))\s+translation\s+to\s+(?:pool\s+\d+\s+\()?((?:\d{1,3}\.){3}\d{1,3})')
+        DynNWExtract = re.compile(s)
+
         NATTranslations = [({'type': p.type.text,
-                   'subtype': p.subtype.text,
-                   'extra': p.extra.text})
-                        for p in soup.findAll('Phase') \
-                            if natType.search(p.type.text) and \
-                            not badSubType.search(p.subtype.text) and \
-                            phaseAllow.search(p.result.text)]
+                             'subtype': p.subtype.text,
+                             'extra': p.extra.text,
+                             'config': p.config.text})
+                           for p in soup.findAll('Phase') \
+                                if natType.search(p.type.text) and \
+                                not badSubType.search(p.subtype.text) and \
+                                phaseAllow.search(p.result.text)]
         for translation in NATTranslations:
             m = NATExtract.search(translation['extra'])
-            if m is None:
-                # No translations
-                continue
-            fromInfo = m.group(1,2)
-            toInfo = m.group(3,4)
-            netmask = m.group(5)
-            # If fromInto and toInfo are not the same, translation is ocurring
-            if set(fromInfo) != set(toInfo):
-                match = self.matchesSrcOrDstIP(fromInfo[0], netmask)
+            n = DynNATExtract.search(translation['config'])
+            if m is not None:
+                fromInfo = m.group(1,2)
+                toInfo = m.group(3,4)
+                netmask = m.group(5)
+                # If fromInto and toInfo are not the same, translation is ocurring
+                if set(fromInfo) != set(toInfo):
+                    match = self.matchesSrcOrDstIP(fromInfo[0], netmask)
+                    matchKey = match + 'NAT'
+                    if match == 'both':
+                        "have a both match!"
+                        print self.get('testParams')
+                    self.update({matchKey: {}})
+                    self.get(matchKey).update({'ip': self.translate(fromInfo[0],
+                                                                    toInfo[0],
+                                                                    netmask)})
+                    if fromInfo[1] != toInfo[1]:
+                        self.get(matchKey).update({'port': toInfo[1]})
+            elif n is not None:
+                o = DynNWExtract.search(translation['config'])
+                if o.group(1) == 'host':
+                    network = o.group(2)
+                    netmask = '255.255.255.255'
+                else:
+                    network = o.group(1)
+                    netmask = o.group(2)
+                newIP = n.group(1)
+
+                match = self.matchesSrcOrDstIP(network, netmask)
                 matchKey = match + 'NAT'
                 if match == 'both':
-                    "have a both match!"
-                    print self.get('testParams')
+                        "have a both match!"
+                        print self.get('testParams')
                 self.update({matchKey: {}})
-                self.get(matchKey).update({'ip': self.translate(fromInfo[0],
-                                                                toInfo[0],
-                                                                netmask)})
-                if fromInfo[1] != toInfo[1]:
-                    self.get(matchKey).update({'port': toInfo[1]})
+                self.get(matchKey).update({'ip': newIP})
+
+
+
+
 
     def getReportHeaders(self):
         return ['Ingress Int',
