@@ -56,6 +56,7 @@ def startProcessor(ASAi=None, **kwargs):
         if kwargs['connect']:
             print ASAp.updateOsVersions(isBaseline=kwargs['gatherBaseline'])
             if kwargs['gatherBaseline']:
+                ASAp.updateRunningConfig()
                 ASAp.updateRouteTable()
                 ASAp.updateObjectGroups()
                 ASAp.updateAccessLists()
@@ -69,11 +70,12 @@ def startProcessor(ASAi=None, **kwargs):
             r.writeReport(ASAp.getUnitTestReports())
             ASAp.exportRawResults(r)
         if kwargs['config'] is not None:
+            baseCfg = ASAp.getBaseMigrationConfig()
             ASAp.processNat()
             NatConfig = ASAp.getNatConfig()
-            #UpdatedsACLs = ASAp.getUpdatedACLs()
+            UpdatedsACLs = ASAp.getUpdatedACLs()
             reporter().writeToFile(kwargs['config'],
-                                '\n'.join([NatConfig]))
+                                '\n'.join([baseCfg, NatConfig, UpdatedsACLs]))
         #ASAp.test()
 
 def main(argv=None): # IGNORE:C0111

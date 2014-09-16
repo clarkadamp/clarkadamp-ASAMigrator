@@ -207,21 +207,21 @@ class AsaAcl (dict):
         allKeys = sorted(allKeys, reverse=True)
 
         for key in allKeys:
-            if key in self.getexactMatchedACLs():
-                retList.append(aclEntries[key].getInactive())
-                retList.append(aclEntries[key].remark('Migration: Made inactive as exact replacement was found'))
-                newRules = aclEntries[key].getUpdatedACLs()
-                retList.extend(newRules)
-                if not newRules[0].startswith('object-group'):
-                    retList.append(aclEntries[key].remark('Migration: Next {} rules(s) added as part of the migration'.format(len(newRules))))
-            elif key in self.getnetMatchedACLs():
+            # netmatched takes precedence over exactmatch as object groups can contain both
+            if  key in self.getnetMatchedACLs():
                 retList.append(aclEntries[key].remark('Migration: More specific entries needed, original left intact'))
                 newRules = aclEntries[key].getUpdatedACLs()
                 retList.extend(newRules)
                 retList.extend(aclEntries[key].getUpdatedACLs())
                 if not newRules[0].startswith('object-group'):
                     retList.append(aclEntries[key].remark('Migration: Next {} rules(s) added as part of the migration'.format(len(newRules))))
-
+            elif key in self.getexactMatchedACLs():
+                retList.append(aclEntries[key].getInactive())
+                retList.append(aclEntries[key].remark('Migration: Made inactive as exact replacement was found'))
+                newRules = aclEntries[key].getUpdatedACLs()
+                retList.extend(newRules)
+                if not newRules[0].startswith('object-group'):
+                    retList.append(aclEntries[key].remark('Migration: Next {} rules(s) added as part of the migration'.format(len(newRules))))
 
         if len(retList) > 0:
             return '\n'.join(retList)

@@ -14,6 +14,7 @@ class ASAProcessor():
     config = {'source': 'ASAProcessor'}
     config['baselineVersion'] = None
     config['osVersions'] = []
+    config['runningConfig'] = []
     config['interfaceMappings'] = {}
     config['accessLists'] = {}
     config['nat'] = {}
@@ -76,6 +77,16 @@ class ASAProcessor():
         self.currentVersion = version
         return version
 
+    def updateRunningConfig(self):
+        if len(self.config['runningConfig']) < 1:
+            self.config['runningConfig'] = \
+                self.interactor.runcmd('show running-config', timeout=60)
+
+    def getBaseMigrationConfig(self):
+        r = re.compile('(^:)|(^static)|(^nat)|(^global)|(^Cryptochecksum)')
+        return '\n'.join([l for l in self.config['runningConfig']
+                                    if not r.search(l)])
+
     def updateRouteTable(self):
 
         if 'routeTable' in self.config.keys() and self.useCache:
@@ -128,12 +139,11 @@ class ASAProcessor():
                                           'aclObj': accessLists[ACLName]}})
 
     def prepareUnitTests(self):
-        interfaces = self._getUnitTestInterfaceNames()
         iMappings = self.config['interfaceMappings']
         #for i in iMappings:
         #    print type(i)
         r = self.config['routeTable']
-        for interface in iMappings.keys():
+        for interface in sorted(iMappings.keys()):
             aclObj = iMappings[interface]['aclObj']
             aclObj.setInterface(interface)
             aclObj.setInterfaceCIDRList(r.getCIDRbyInterface(interface))
@@ -157,8 +167,10 @@ class ASAProcessor():
 
     def performUnitTests(self):
         totalTest = 0
-        for aclObj in self._getUnitTestInterfaceObjects():
+        aclObjs = self._getUnitTestInterfaceObjects()
+        aclObjs.sort(key=lambda x: x['name'])
 
+        for aclObj in aclObjs:
             numUnitTests = aclObj.numUnitTests(version=self.currentVersion)
             totalTest += numUnitTests
 
@@ -169,7 +181,9 @@ class ASAProcessor():
         tEstimator = TimeEstimator(totalTest)
 
         t = 0
-        for aclObj in self._getUnitTestInterfaceObjects():
+
+
+        for aclObj in aclObjs:
             unitTestGenerator = aclObj.unitTests(version=self.currentVersion)
             testResponse = aclObj.setTestResults(version=self.currentVersion)
             testResponse.next()
@@ -402,9 +416,11 @@ class ASAProcessor():
             d.update({'real_svc': realSvcGrp,
                       'mapped_svc': mappedSvcGrp})
         natObj.addStaticNAT(**d)
-        # Hook into Access Lists to update to reflect new destination
-        ACL = self.config['interfaceMappings'][snatObj['mappedifc']]['aclObj']
-        ACL.changeDestinationIP(mcidr, rcidr)
+
+        if mcidr != rcidr:
+            # Hook into Access Lists to update to reflect new destination
+            ACL = self.config['interfaceMappings'][snatObj['mappedifc']]['aclObj']
+            ACL.changeDestinationIP(mcidr, rcidr)
 
 
     def _processPolicyStaticNAT(self, snatObj):
@@ -511,7 +527,9 @@ class ASAProcessor():
         #netMatchedACLs = self.get('netMatchedACLs')
         aclUpdates = []
         for acl in accessLists:
-            aclUpdates.append(accessLists[acl].getUpdatedACLs())
+            l = accessLists[acl].getUpdatedACLs()
+            if l is not None:
+                aclUpdates.append(l)
 
         return '\n'.join(aclUpdates)
 

@@ -71,4 +71,8 @@ def CIDRMatch(cidr1, cidr2):
 
     return False
 
+def NATTranslate(oCIDR, tCIDR):
+    onetwork, oprefixLen = oCIDR.split('/')
+    tnetwork, tprefixLen = tCIDR.split('/')
+
 
