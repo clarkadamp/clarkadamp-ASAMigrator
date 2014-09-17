@@ -619,6 +619,7 @@ class ACESrcDst(dict):
     def updateNetwork(self, cidr):
         network, prefixLen = cidr.split('/')
         netmask = ipUtils.netmaskFromPrefixLength(prefixLen)
+
         self.update({'network': network,
                      'netmask': netmask})
         if prefixLen == '32':
@@ -885,8 +886,8 @@ class TestResult(dict):
                 'Action',
                 'NAT Info',
                 'Drop Code',
-                'Drop Reason',
-                'ACL Text']
+                'Drop Reason']
+                #'ACL Text']
 
     def getReportTemplate(self):
         t = {}
@@ -905,7 +906,7 @@ class TestResult(dict):
         report.update({'Action': self.xstr(self.get('action'))})
         report.update({'Drop Code': self.xstr(self.get('dropCode'))})
         report.update({'Drop Reason': self.xstr(self.get('dropReason'))})
-        report.update({'ACL Text': self.xstr(self.get('aclText'))})
+        #report.update({'ACL Text': self.xstr(self.get('aclText'))})
 
         sNAT = self.getSrcNATBehaviour()
         dNAT = self.getDstNATBehaviour()
