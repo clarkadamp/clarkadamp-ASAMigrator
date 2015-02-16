@@ -9,6 +9,7 @@ from AsaObjGrp import *
 from RouteTable import *
 from ipUtils import *
 
+
 class ASAProcessor():
 
     config = {'source': 'ASAProcessor'}
@@ -501,7 +502,9 @@ class ASAProcessor():
         elif 'cidr' in sd.keys():
             address = objGrpObj.createNetworkGroup(**sd)
 
-        if prot['protocol'] == 'ip':
+        if 'service-object' in prot.keys():
+            service = prot['service-object']  
+        elif prot['protocol'] == 'ip':
             service = None
         elif  'service-object' in sd.keys():
             protocolHint = prot['protocol']
